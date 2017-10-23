@@ -1,6 +1,7 @@
 var stomp = require('./lib/stomp');
 var http = require("http");
 var WebSocketServer = require('ws').Server;
+var sockjs = require('sockjs');
 var EventEmitter = require('events');
 var util = require('util');
 
@@ -27,6 +28,7 @@ var StompServer = function (config) {
   this.conf = {
     server: config.server,
     path: config.path || "/stomp",
+    useHttp: config.useHttp,
     debug: config.debug || function (args) {
     }
   };
@@ -39,11 +41,16 @@ var StompServer = function (config) {
   this.heartBeatConfig = {client: 0, server: 0};
 
 
-  this.socket = new WebSocketServer({
-    server: this.conf.server,
-    path: this.conf.path,
-    perMessageDeflate: false
-  });
+  if (this.conf.useHttp) {
+    this.socket = sockjs.createServer({ sockjs_url: 'http://cdn.jsdelivr.net/sockjs/1.0.1/sockjs.min.js' });
+    this.socket.installHandlers(this.conf.server, {prefix: this.conf.path});
+  } else {
+    this.socket = new WebSocketServer({
+      server: this.conf.server,
+      path: this.conf.path,
+      perMessageDeflate: false
+    });
+  }
 
   /**
    * Client connecting event, emitted after socket is opened.
@@ -51,17 +58,19 @@ var StompServer = function (config) {
    * @type {object}
    * @property {string} sessionId
    * */
-  this.socket.on('connection', function (webSocket) {
-    webSocket.sessionId = stomp.StompUtils.genId();
-    this.emit('connecting', webSocket.sessionId);
-    this.conf.debug("Connect", webSocket.sessionId);
-    webSocket.on('message', parseRequest.bind(this, webSocket));
-    webSocket.on('close', connectionClose.bind(this, webSocket));
-    webSocket.on('error', function (err) {
-      this.conf.debug(err);
-      this.emit('error', err);
-    }.bind(this));
-  }.bind(this));
+   this.socket.on('connection', function (webSocket) {
+     webSocket.sessionId = stomp.StompUtils.genId();
+     if (this.conf.useHttp) webSocket.send = webSocket.write;
+     this.emit('connecting', webSocket.sessionId);
+     this.conf.debug("Connect", webSocket.sessionId);
+     webSocket.on('data', parseRequest.bind(this, webSocket));
+     webSocket.on('message', parseRequest.bind(this, webSocket));
+     webSocket.on('close', connectionClose.bind(this, webSocket));
+     webSocket.on('error', function (err) {
+       this.conf.debug(err);
+       this.emit('error', err);
+     }.bind(this));
+   }.bind(this));
 
   /*############# EVENTS ###################### */
 
