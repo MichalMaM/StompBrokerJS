@@ -29,6 +29,7 @@ var StompServer = function (config) {
     server: config.server,
     path: config.path || "/stomp",
     useHttp: config.useHttp,
+    allowQueues: config.allowQueues || false,
     debug: config.debug || function (args) {
     }
   };
@@ -37,6 +38,7 @@ var StompServer = function (config) {
   }
 
   this.subscribes = [];
+  this.sendDataQueues = {};
   this.frameHandler = new stomp.FrameHandler(this);
   this.heartBeatConfig = {client: 0, server: 0};
 
@@ -135,6 +137,17 @@ var StompServer = function (config) {
     }
   };
 
+  this._sendToSubscription = function (sub, socket, frame) {
+    frame.headers.subscription = sub.id;
+    frame.command = "MESSAGE";
+    var sock = sub.socket;
+    if (sock !== undefined) {
+      stomp.StompUtils.sendFrame(sock, frame);
+    } else {
+      this.emit(sub.id, frame.body, frame.headers);
+    }
+  }
+
   /**
    * Send message to matching subscribers.
    *
@@ -143,6 +156,7 @@ var StompServer = function (config) {
    * @private
    */
   this._sendToSubscriptions = function (socket, args) {
+    let matchAny = false;
     for (var i in this.subscribes) {
       var sub = this.subscribes[i];
       if (socket.sessionId === sub.sessionId) {
@@ -150,15 +164,13 @@ var StompServer = function (config) {
       }
       var match = this._checkSubMatchDest(sub, args);
       if (match) {
-        args.frame.headers.subscription = sub.id;
-        args.frame.command = "MESSAGE";
-        var sock = sub.socket;
-        if (sock !== undefined) {
-          stomp.StompUtils.sendFrame(sock, args.frame);
-        } else {
-          this.emit(sub.id, args.frame.body, args.frame.headers);
-        }
+        matchAny = true;
+        this._sendToSubscription(sub, socket, args.frame)
       }
+    }
+
+    if (this.conf.allowQueues && !matchAny) {
+      this.sendDataQueues[args.dest] = (this.sendDataQueues[args.dest] || []).concat([args.frame]);
     }
   };
 
@@ -187,6 +199,16 @@ var StompServer = function (config) {
     return match;
   };
 
+  this._sendUnsendedData = function (sub, socket, args) {
+    let dataForSend = this.sendDataQueues[args.dest];
+    if ((dataForSend || []).length) {
+      for (let f of dataForSend) {
+        this._sendToSubscription(sub, socket, f);
+      }
+      this.sendDataQueues[args.dest] = [];
+    }
+  }
+
   /**
    * Client subscribe event, emitted when client subscribe topic
    * @event StompServer#subscribe
@@ -208,6 +230,9 @@ var StompServer = function (config) {
     this.subscribes.push(sub);
     this.emit("subscribe", sub);
     this.conf.debug("Server subscribe", args.id, args.dest);
+    if (this.conf.allowQueues) {
+      this._sendUnsendedData(sub, socket, args);
+    }
     return true;
   };
   /**
